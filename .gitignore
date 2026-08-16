@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+mailboxes.txt
+mail-archive/
+*.mbox
+.DS_Store
