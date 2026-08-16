@@ -47,7 +47,7 @@ class ImapSession:
         port: int,
         username: str,
         password: str,
-        timeout: int = 60,
+        timeout: int = 180,
     ) -> None:
         self.host = host
         self.port = port
@@ -135,14 +135,30 @@ class ImapSession:
         return [token.decode("ascii") for token in blob.split() if token]
 
     def fetch_raw(self, uid: str) -> bytes:
-        client = self._require()
-        status, payload = client.uid("fetch", uid, "(BODY.PEEK[])")
-        if status != "OK":
-            raise MailArchiveError(f"Не удалось скачать UID {uid}: {payload}")
-        raw = _extract_fetch_bytes(payload)
+        found = self.fetch_raw_many([uid])
+        raw = found.get(uid)
         if raw is None:
             raise MailArchiveError(f"Пустой ответ IMAP для UID {uid}")
         return raw
+
+    def fetch_raw_many(self, uids: list[str]) -> dict[str, bytes]:
+        if not uids:
+            return {}
+        client = self._require()
+        status, payload = client.uid("fetch", ",".join(uids), "(UID BODY.PEEK[])")
+        if status != "OK":
+            raise MailArchiveError(f"Не удалось скачать UID {','.join(uids[:5])}: {payload}")
+        found: dict[str, bytes] = {}
+        unpaired: list[bytes] = []
+        for uid, raw in _extract_fetch_items(payload):
+            if uid:
+                found[uid] = raw
+            else:
+                unpaired.append(raw)
+        if unpaired:
+            for uid, raw in zip((item for item in uids if item not in found), unpaired):
+                found[uid] = raw
+        return found
 
     def _status_uidvalidity(self, quoted_folder: str) -> str:
         client = self._require()
@@ -168,6 +184,8 @@ def archive_mailboxes(
     limit_per_folder: int | None = None,
     session_factory: Callable[..., Any] | None = None,
     log: Callable[[str], None] | None = None,
+    write_mbox: bool = True,
+    batch_size: int = 20,
 ) -> list[ArchiveResult]:
     output_dir.mkdir(parents=True, exist_ok=True)
     results: list[ArchiveResult] = []
@@ -186,6 +204,8 @@ def archive_mailboxes(
             limit_per_folder=limit_per_folder,
             session_factory=factory,
             log=emit,
+            write_mbox=write_mbox,
+            batch_size=batch_size,
         )
         results.append(result)
         mailbox_dir = output_dir / mailbox_dirname(address)
@@ -213,6 +233,8 @@ def archive_one_mailbox(
     limit_per_folder: int | None = None,
     session_factory: Callable[..., Any] | None = None,
     log: Callable[[str], None] | None = None,
+    write_mbox: bool = True,
+    batch_size: int = 20,
 ) -> ArchiveResult:
     emit = log or (lambda _message: None)
     result = ArchiveResult(address=address)
@@ -249,6 +271,8 @@ def archive_one_mailbox(
                     known=known,
                     limit_per_folder=limit_per_folder,
                     log=emit,
+                    write_mbox=write_mbox,
+                    batch_size=batch_size,
                 )
                 result.downloaded += downloaded
                 result.skipped += skipped
@@ -278,6 +302,8 @@ def _archive_folder(
     known: set[tuple[Any, str]],
     limit_per_folder: int | None,
     log: Callable[[str], None],
+    write_mbox: bool = True,
+    batch_size: int = 20,
 ) -> tuple[int, int]:
     def restore_folder() -> str:
         return session.select(imap_name)
@@ -301,27 +327,69 @@ def _archive_folder(
         uids = uids[:limit_per_folder]
     downloaded = 0
     skipped = 0
-    for uid in uids:
-        if (display_name, uid) in known:
-            skipped += 1
-            continue
-        raw = _with_retry(
-            session,
-            lambda current=uid: session.fetch_raw(current),
-            log,
-            after_reconnect=restore_folder,
-        )
-        parsed = parse_raw_message(raw, uid)
-        record = write_message_files(mailbox_dir, display_name, parsed)
-        append_mbox(mailbox_dir, display_name, parsed)
-        messages.append(record)
-        known.add((display_name, uid))
-        folder_info.setdefault("uids", []).append(uid)
-        downloaded += 1
-        if downloaded % 10 == 0:
+    pending = [uid for uid in uids if (display_name, uid) not in known]
+    skipped = len(uids) - len(pending)
+    chunk_size = max(1, batch_size)
+    for offset in range(0, len(pending), chunk_size):
+        chunk = pending[offset : offset + chunk_size]
+        fetched = _fetch_chunk(session, chunk, log, restore_folder)
+        for uid in chunk:
+            raw = fetched.get(uid)
+            if raw is None:
+                raise MailArchiveError(f"Пустой ответ IMAP для UID {uid}")
+            parsed = parse_raw_message(raw, uid)
+            record = write_message_files(mailbox_dir, display_name, parsed)
+            if write_mbox:
+                append_mbox(mailbox_dir, display_name, parsed)
+            messages.append(record)
+            known.add((display_name, uid))
+            folder_info.setdefault("uids", []).append(uid)
+            downloaded += 1
+        if downloaded % 100 < len(chunk):
             log(f"    скачано {downloaded} писем в «{display_name}»")
             save_state(mailbox_dir, {"folders": folders_state, "messages": messages})
+    if downloaded:
+        save_state(mailbox_dir, {"folders": folders_state, "messages": messages})
     return downloaded, skipped
+
+
+def _fetch_chunk(
+    session: Any,
+    chunk: list[str],
+    log: Callable[[str], None],
+    restore_folder: Callable[[], Any],
+) -> dict[str, bytes]:
+    def fetch_batch() -> dict[str, bytes]:
+        if hasattr(session, "fetch_raw_many"):
+            return session.fetch_raw_many(chunk)
+        return {uid: session.fetch_raw(uid) for uid in chunk}
+
+    try:
+        found = _with_retry(session, fetch_batch, log, after_reconnect=restore_folder)
+        missing = [uid for uid in chunk if uid not in found]
+        if not missing:
+            return found
+        for uid in missing:
+            found[uid] = _with_retry(
+                session,
+                lambda current=uid: session.fetch_raw(current),
+                log,
+                after_reconnect=restore_folder,
+            )
+        return found
+    except MailArchiveError:
+        if len(chunk) == 1:
+            raise
+        log(f"    пакет из {len(chunk)} не прошёл, качаю по одному")
+        found = {}
+        for uid in chunk:
+            found[uid] = _with_retry(
+                session,
+                lambda current=uid: session.fetch_raw(current),
+                log,
+                after_reconnect=restore_folder,
+            )
+        return found
 
 
 def _with_retry(
@@ -355,14 +423,26 @@ def _quote_mailbox(name: str) -> str:
     return f'"{escaped}"'
 
 
-def _extract_fetch_bytes(payload: Any) -> bytes | None:
+def _extract_fetch_items(payload: Any) -> list[tuple[str | None, bytes]]:
+    items: list[tuple[str | None, bytes]] = []
     if not payload:
-        return None
+        return items
     for item in payload:
         if isinstance(item, tuple) and len(item) >= 2:
-            blob = item[1]
-            if isinstance(blob, (bytes, bytearray)) and blob:
-                return bytes(blob)
+            meta, blob = item[0], item[1]
+            if not isinstance(blob, (bytes, bytearray)) or not blob:
+                continue
+            uid = None
+            if isinstance(meta, (bytes, bytearray)):
+                match = re.search(rb"UID (\d+)", meta)
+                if match:
+                    uid = match.group(1).decode("ascii")
+            items.append((uid, bytes(blob)))
         elif isinstance(item, (bytes, bytearray)) and b"\n" in item and len(item) > 40:
-            return bytes(item)
-    return None
+            items.append((None, bytes(item)))
+    return items
+
+
+def _extract_fetch_bytes(payload: Any) -> bytes | None:
+    items = _extract_fetch_items(payload)
+    return items[0][1] if items else None

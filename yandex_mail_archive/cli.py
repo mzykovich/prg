@@ -50,6 +50,17 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         help="Для проверки: скачать не больше N писем из каждой папки.",
     )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=15,
+        help="Сколько писем забирать за один запрос IMAP. По умолчанию: 15",
+    )
+    parser.add_argument(
+        "--no-mbox",
+        action="store_true",
+        help="Не писать folder.mbox (экономит место, .eml всё равно сохраняются).",
+    )
     return parser
 
 
@@ -103,6 +114,8 @@ def main(argv: list[str] | None = None) -> int:
         host=args.host,
         port=args.port,
         limit_per_folder=args.limit,
+        write_mbox=not args.no_mbox,
+        batch_size=args.batch_size,
         log=print,
     )
     print("\nГотово.")

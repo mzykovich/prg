@@ -5,7 +5,7 @@ import unittest
 from email.message import EmailMessage
 from pathlib import Path
 
-from yandex_mail_archive.archiver import MailArchiveError, _extract_fetch_bytes, archive_mailboxes
+from yandex_mail_archive.archiver import MailArchiveError, _extract_fetch_bytes, _extract_fetch_items, archive_mailboxes
 from yandex_mail_archive.cli import load_mailboxes
 from yandex_mail_archive.html_export import load_state
 from yandex_mail_archive.imap_utf7 import decode_modified_utf7
@@ -73,11 +73,25 @@ class FakeSession:
         assert self.selected is not None
         return self.mailboxes[self.username][self.selected][uid]
 
+    def fetch_raw_many(self, uids: list[str]) -> dict[str, bytes]:
+        return {uid: self.fetch_raw(uid) for uid in uids}
+
 
 class FetchParseTests(unittest.TestCase):
     def test_extracts_literal_payload(self) -> None:
         payload = [(b"1 (UID 1 BODY[] {12}", b"From: a\r\n\r\nHi"), b")"]
         self.assertEqual(_extract_fetch_bytes(payload), b"From: a\r\n\r\nHi")
+
+    def test_extracts_multiple_uids(self) -> None:
+        payload = [
+            (b"1 (UID 10 BODY[] {12}", b"From: a\r\n\r\nA"),
+            b")",
+            (b"2 (UID 11 BODY[] {12}", b"From: b\r\n\r\nB"),
+            b")",
+        ]
+        items = _extract_fetch_items(payload)
+        self.assertEqual(items[0], ("10", b"From: a\r\n\r\nA"))
+        self.assertEqual(items[1], ("11", b"From: b\r\n\r\nB"))
 
     def test_empty_payload(self) -> None:
         self.assertIsNone(_extract_fetch_bytes(None))
