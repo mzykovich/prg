@@ -117,6 +117,19 @@ class MailParserTests(unittest.TestCase):
         self.assertNotIn("onclick", clean)
         self.assertIn("http://ok/a.png", clean)
 
+    def test_parses_crlf_in_from_header(self) -> None:
+        raw = (
+            b'From: "Bad\r\n Name" <ivan@company.ru>\r\n'
+            b"Subject: =?UTF-8?B?0KLQtdGB0YI=?=\r\n"
+            b"Date: Thu, 16 Jan 2025 09:00:00 +0300\r\n"
+            b"\r\n"
+            b"Hello\r\n"
+        )
+        parsed = parse_raw_message(raw, "99")
+        self.assertEqual(parsed.uid, "99")
+        self.assertTrue(parsed.subject)
+        self.assertIn(b"Hello", parsed.raw)
+
     def test_safe_filename(self) -> None:
         self.assertEqual(safe_filename('a/b:c*.eml'), "a_b_c_.eml")
         self.assertEqual(safe_filename("   "), "file")

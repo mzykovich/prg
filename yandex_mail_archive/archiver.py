@@ -336,11 +336,16 @@ def _archive_folder(
         for uid in chunk:
             raw = fetched.get(uid)
             if raw is None:
-                raise MailArchiveError(f"Пустой ответ IMAP для UID {uid}")
-            parsed = parse_raw_message(raw, uid)
-            record = write_message_files(mailbox_dir, display_name, parsed)
-            if write_mbox:
-                append_mbox(mailbox_dir, display_name, parsed)
+                log(f"    UID {uid}: пустой ответ IMAP, пропускаю")
+                continue
+            try:
+                parsed = parse_raw_message(raw, uid)
+                record = write_message_files(mailbox_dir, display_name, parsed)
+                if write_mbox:
+                    append_mbox(mailbox_dir, display_name, parsed)
+            except Exception as exc:
+                log(f"    UID {uid}: не разобралось ({exc}), сохраняю сырой .eml")
+                record = _write_raw_fallback(mailbox_dir, display_name, uid, raw)
             messages.append(record)
             known.add((display_name, uid))
             folder_info.setdefault("uids", []).append(uid)
@@ -351,6 +356,28 @@ def _archive_folder(
     if downloaded:
         save_state(mailbox_dir, {"folders": folders_state, "messages": messages})
     return downloaded, skipped
+
+
+def _write_raw_fallback(mailbox_dir: Path, folder_name: str, uid: str, raw: bytes) -> dict[str, Any]:
+    folder_dir = mailbox_dir / safe_filename(folder_name, fallback="folder")
+    folder_dir.mkdir(parents=True, exist_ok=True)
+    eml_path = folder_dir / f"{uid}.eml"
+    eml_path.write_bytes(raw)
+    return {
+        "uid": uid,
+        "folder": folder_name,
+        "subject": f"(не разобрано UID {uid})",
+        "from": "",
+        "to": "",
+        "cc": "",
+        "date": "",
+        "date_raw": "",
+        "eml": str(eml_path.relative_to(mailbox_dir)),
+        "html": "",
+        "attachments": [],
+        "snippet": "",
+        "message_id": "",
+    }
 
 
 def _fetch_chunk(

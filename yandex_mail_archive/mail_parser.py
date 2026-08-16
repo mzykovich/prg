@@ -48,9 +48,9 @@ def decode_header_value(value: str | None) -> str:
         return ""
     try:
         decoded = str(make_header(decode_header(value)))
-    except (LookupError, UnicodeDecodeError, ValueError):
-        decoded = value
-    return _WHITESPACE.sub(" ", decoded).strip()
+    except Exception:
+        decoded = str(value)
+    return _WHITESPACE.sub(" ", decoded).replace("\r", " ").replace("\n", " ").strip()
 
 
 def parse_email_date(value: str | None) -> dt.datetime | None:
@@ -78,23 +78,54 @@ def mailbox_dirname(address: str) -> str:
 
 
 def parse_raw_message(raw: bytes, uid: str) -> ParsedMessage:
-    message = BytesParser(policy=policy.default).parsebytes(raw)
-    html_body, text_body, attachments = _extract_bodies(message)
-    date_raw = decode_header_value(message.get("Date"))
+    message = _parse_bytes(raw)
+    try:
+        html_body, text_body, attachments = _extract_bodies(message)
+    except Exception:
+        html_body, text_body, attachments = "", "", []
+    date_raw = _safe_header(message, "Date")
     return ParsedMessage(
         uid=str(uid),
-        subject=decode_header_value(message.get("Subject")) or "(без темы)",
-        from_addr=decode_header_value(message.get("From")),
-        to_addr=decode_header_value(message.get("To")),
-        cc_addr=decode_header_value(message.get("Cc")),
-        date=parse_email_date(message.get("Date")),
+        subject=_safe_header(message, "Subject") or "(без темы)",
+        from_addr=_safe_header(message, "From"),
+        to_addr=_safe_header(message, "To"),
+        cc_addr=_safe_header(message, "Cc"),
+        date=parse_email_date(date_raw),
         date_raw=date_raw,
         text_body=text_body.strip(),
         html_body=html_body,
         attachments=attachments,
-        message_id=decode_header_value(message.get("Message-ID")),
+        message_id=_safe_header(message, "Message-ID"),
         raw=raw,
     )
+
+
+def _parse_bytes(raw: bytes) -> Message:
+    last_error: Exception | None = None
+    for pol in (policy.compat32, policy.default):
+        try:
+            return BytesParser(policy=pol).parsebytes(raw)
+        except Exception as exc:
+            last_error = exc
+    raise MailParseError(str(last_error) if last_error else "не удалось разобрать письмо")
+
+
+class MailParseError(RuntimeError):
+    pass
+
+
+def _safe_header(message: Message, name: str) -> str:
+    try:
+        value = message.get(name)
+    except Exception:
+        try:
+            values = message.get_all(name, [])
+            value = ", ".join(str(item) for item in values)
+        except Exception:
+            return ""
+    if value is None:
+        return ""
+    return decode_header_value(str(value))
 
 
 def snippet_from(parsed: ParsedMessage, limit: int = 140) -> str:
