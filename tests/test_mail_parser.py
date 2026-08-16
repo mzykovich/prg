@@ -133,6 +133,9 @@ class MailParserTests(unittest.TestCase):
     def test_safe_filename(self) -> None:
         self.assertEqual(safe_filename('a/b:c*.eml'), "a_b_c_.eml")
         self.assertEqual(safe_filename("   "), "file")
+        long_name = "Подтверждение_" * 20
+        encoded = safe_filename(long_name).encode("utf-8")
+        self.assertLessEqual(len(encoded), 160)
 
 
 if __name__ == "__main__":

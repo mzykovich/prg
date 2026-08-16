@@ -65,12 +65,16 @@ def parse_email_date(value: str | None) -> dt.datetime | None:
     return parsed.astimezone(dt.timezone.utc)
 
 
-def safe_filename(name: str, fallback: str = "file") -> str:
+def safe_filename(name: str, fallback: str = "file", max_bytes: int = 160) -> str:
     cleaned = _UNSAFE_FILENAME.sub("_", name or "").strip(" ._")
     cleaned = cleaned.replace("..", "_")
     if not cleaned:
         cleaned = fallback
-    return cleaned[:120]
+    encoded = cleaned.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return cleaned
+    truncated = encoded[:max_bytes].decode("utf-8", errors="ignore").rstrip(" ._")
+    return truncated or fallback
 
 
 def mailbox_dirname(address: str) -> str:
