@@ -55,6 +55,9 @@ def write_message_files(
         attach_dir = folder_dir / f"{stem}_files"
         attach_dir.mkdir(parents=True, exist_ok=True)
         for item in parsed.attachments:
+            # Large ordinary attachments stay inside the .eml to save disk.
+            if not item.inline and not item.content_id and len(item.payload) > 200_000:
+                continue
             target = attach_dir / item.filename
             target.write_bytes(item.payload)
             saved_attachments.append(str(target.relative_to(mailbox_dir)))
